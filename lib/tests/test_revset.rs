@@ -1528,6 +1528,109 @@ fn test_evaluate_expression_roots() {
 }
 
 #[test]
+fn test_evaluate_expression_forks() {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    let root_commit = repo.store().root_commit();
+    let mut tx = repo.start_transaction();
+    let mut_repo = tx.repo_mut();
+    /*
+     * 9       <- merge
+     * |\ \
+     * 6 7 8
+     * |/ /
+     * 5       <- 3-way fork
+     * |
+     * 3 4     <- not a fork
+     * |/
+     * 1 2     <- 2-way fork
+     * |/
+     * 0       <- 2-way fork from root
+     */
+    let commit1 = write_random_commit(mut_repo);
+    let commit2 = write_random_commit(mut_repo);
+    let commit3 = write_random_commit_with_parents(mut_repo, &[&commit1]);
+    let commit4 = write_random_commit_with_parents(mut_repo, &[&commit1]);
+    let commit5 = write_random_commit_with_parents(mut_repo, &[&commit3]);
+    let commit6 = write_random_commit_with_parents(mut_repo, &[&commit5]);
+    let commit7 = write_random_commit_with_parents(mut_repo, &[&commit5]);
+    let commit8 = write_random_commit_with_parents(mut_repo, &[&commit5]);
+    let _commit9 = write_random_commit_with_parents(mut_repo, &[&commit6, &commit7, &commit8]);
+
+    // Forks of an empty set is an empty set
+    assert_eq!(resolve_commit_ids(mut_repo, "forks(none())"), vec![]);
+
+    // In the above graph, the forks are 0, 1, and 5
+    assert_eq!(
+        resolve_commit_ids(mut_repo, "forks(all())"),
+        vec![
+            commit5.id().clone(),
+            commit1.id().clone(),
+            root_commit.id().clone(),
+        ]
+    );
+
+    // 2-way fork from the root commit
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!("forks(root() | {} | {})", commit1.id(), commit2.id())
+        ),
+        vec![root_commit.id().clone()]
+    );
+
+    // 2-way fork from a normal commit
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!(
+                "forks({} | {} | {})",
+                commit1.id(),
+                commit3.id(),
+                commit4.id()
+            )
+        ),
+        vec![commit1.id().clone()]
+    );
+
+    // 3-way fork from a normal commit
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!(
+                "forks({} | {} | {} | {})",
+                commit5.id(),
+                commit6.id(),
+                commit7.id(),
+                commit8.id()
+            )
+        ),
+        vec![commit5.id().clone()]
+    );
+
+    // 5 is not a fork if its children are _not_ in the set
+    assert_eq!(
+        resolve_commit_ids(mut_repo, &format!("forks({})", commit5.id())),
+        vec![]
+    );
+
+    // 5 is not a fork if _only_ is children are in the set
+    assert_eq!(
+        resolve_commit_ids(
+            mut_repo,
+            &format!(
+                "forks({} | {} | {})",
+                commit6.id(),
+                commit7.id(),
+                commit8.id()
+            )
+        ),
+        vec![]
+    );
+}
+
+#[test]
 fn test_evaluate_expression_parents() -> TestResult {
     let test_workspace = TestWorkspace::init();
     let repo = &test_workspace.repo;
