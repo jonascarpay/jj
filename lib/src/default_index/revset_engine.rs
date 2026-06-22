@@ -16,6 +16,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fmt;
@@ -402,6 +403,88 @@ where
         let mut p2 = self.predicate.to_predicate_fn();
         Box::new(move |index, pos| Ok(p1(index, pos)? && p2(index, pos)?))
     }
+}
+
+#[derive(Debug)]
+struct ForksRevset<S> {
+    candidates: S,
+}
+
+impl<S: InternalRevset> InternalRevset for ForksRevset<S> {
+    fn positions<'a>(&self) -> BoxedRevWalk<'a>
+    where
+        Self: 'a,
+    {
+        Box::new(ForksRevWalk {
+            candidates: self.candidates.positions(),
+            child_counts: HashMap::new(),
+        })
+    }
+}
+
+impl<S: InternalRevset> ToPredicateFn for ForksRevset<S> {
+    fn to_predicate_fn<'a>(&self) -> BoxedPredicateFn<'a>
+    where
+        Self: 'a,
+    {
+        predicate_fn_from_fallible_rev_walk(ForksRevWalk {
+            candidates: self.candidates.positions(),
+            child_counts: HashMap::new(),
+        })
+    }
+}
+
+struct ForksRevWalk<W> {
+    candidates: W,
+    child_counts: HashMap<GlobalCommitPosition, usize>,
+}
+
+impl<W> RevWalk<CompositeIndex> for ForksRevWalk<W>
+where
+    W: RevWalk<CompositeIndex, Item = Result<GlobalCommitPosition, RevsetEvaluationError>>,
+{
+    type Item = W::Item;
+
+    fn next(&mut self, index: &CompositeIndex) -> Option<Self::Item> {
+        while let Some(pos) = self.candidates.next(index) {
+            let pos = match pos {
+                Ok(pos) => pos,
+                Err(err) => return Some(Err(err)),
+            };
+            let child_count = self.child_counts.remove(&pos).unwrap_or(0);
+            for parent_pos in index.commits().entry_by_pos(pos).parent_positions() {
+                *self.child_counts.entry(parent_pos).or_insert(0) += 1;
+            }
+            if child_count >= 2 {
+                return Some(Ok(pos));
+            }
+        }
+        None
+    }
+}
+
+fn predicate_fn_from_fallible_rev_walk<'a, W>(walk: W) -> BoxedPredicateFn<'a>
+where
+    W: RevWalk<CompositeIndex, Item = Result<GlobalCommitPosition, RevsetEvaluationError>> + 'a,
+{
+    let mut walk = walk.peekable();
+    Box::new(move |index, entry_pos| {
+        while let Some(Ok(pos)) = walk.peek(index) {
+            if *pos > entry_pos {
+                walk.next(index);
+            } else {
+                break;
+            }
+        }
+        match walk.peek(index) {
+            Some(Ok(pos)) if *pos == entry_pos => {
+                walk.next(index);
+                Ok(true)
+            }
+            Some(Err(_)) => Err(walk.next(index).unwrap().unwrap_err()),
+            _ => Ok(false),
+        }
+    })
 }
 
 #[derive(Debug)]
@@ -969,6 +1052,10 @@ impl EvaluationContext<'_> {
                         .any(|parent| filled.contains(parent))
                 });
                 Ok(Box::new(EagerRevset { positions }))
+            }
+            ResolvedExpression::Forks(candidates) => {
+                let candidates = self.evaluate(candidates)?;
+                Ok(Box::new(ForksRevset { candidates }))
             }
             ResolvedExpression::ForkPoint(expression) => {
                 let expression_set = self.evaluate(expression)?;

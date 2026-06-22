@@ -312,6 +312,7 @@ pub enum RevsetExpression<St: ExpressionState> {
         filter: Arc<Self>,
     },
     Roots(Arc<Self>),
+    Forks(Arc<Self>),
     ForkPoint(Arc<Self>),
     Bisect(Arc<Self>),
     HasSize {
@@ -474,6 +475,11 @@ impl<St: ExpressionState> RevsetExpression<St> {
     /// Commits in `self` that don't have ancestors in `self`.
     pub fn roots(self: &Arc<Self>) -> Arc<Self> {
         Arc::new(Self::Roots(self.clone()))
+    }
+
+    /// Commits in `self` that have 2 or more children in `self`.
+    pub fn forks(self: &Arc<Self>) -> Arc<Self> {
+        Arc::new(Self::Forks(self.clone()))
     }
 
     /// Parents of `self`.
@@ -758,6 +764,7 @@ pub enum ResolvedExpression {
         filter: Option<ResolvedPredicateExpression>,
     },
     Roots(Box<Self>),
+    Forks(Box<Self>),
     ForkPoint(Box<Self>),
     Bisect(Box<Self>),
     HasSize {
@@ -885,6 +892,15 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
         let [arg] = function.expect_exact_arguments()?;
         let candidates = lower_expression(diagnostics, arg, context)?;
         Ok(candidates.roots())
+    });
+    map.insert("forks", |diagnostics, function, context| {
+        let ([], [opt_arg]) = function.expect_arguments()?;
+        let candidates = if let Some(arg) = opt_arg {
+            lower_expression(diagnostics, arg, context)?
+        } else {
+            RevsetExpression::all()
+        };
+        Ok(candidates.forks())
     });
     map.insert("visible_heads", |_diagnostics, function, _context| {
         function.expect_no_arguments()?;
@@ -1559,6 +1575,9 @@ fn try_transform_expression<St: ExpressionState, E>(
             RevsetExpression::Roots(candidates) => {
                 transform_rec(candidates, pre, post)?.map(RevsetExpression::Roots)
             }
+            RevsetExpression::Forks(candidates) => {
+                transform_rec(candidates, pre, post)?.map(RevsetExpression::Forks)
+            }
             RevsetExpression::ForkPoint(expression) => {
                 transform_rec(expression, pre, post)?.map(RevsetExpression::ForkPoint)
             }
@@ -1804,6 +1823,10 @@ where
         RevsetExpression::Roots(roots) => {
             let roots = folder.fold_expression(roots)?;
             RevsetExpression::Roots(roots).into()
+        }
+        RevsetExpression::Forks(candidates) => {
+            let candidates = folder.fold_expression(candidates)?;
+            RevsetExpression::Forks(candidates).into()
         }
         RevsetExpression::ForkPoint(expression) => {
             let expression = folder.fold_expression(expression)?;
@@ -3174,6 +3197,9 @@ impl VisibilityResolutionContext<'_> {
             RevsetExpression::Roots(candidates) => {
                 ResolvedExpression::Roots(self.resolve(candidates).into())
             }
+            RevsetExpression::Forks(candidates) => {
+                ResolvedExpression::Forks(self.resolve(candidates).into())
+            }
             RevsetExpression::ForkPoint(expression) => {
                 ResolvedExpression::ForkPoint(self.resolve(expression).into())
             }
@@ -3313,6 +3339,7 @@ impl VisibilityResolutionContext<'_> {
             | RevsetExpression::Heads(_)
             | RevsetExpression::HeadsRange { .. }
             | RevsetExpression::Roots(_)
+            | RevsetExpression::Forks(_)
             | RevsetExpression::ForkPoint(_)
             | RevsetExpression::Bisect(_)
             | RevsetExpression::HasSize { .. }
